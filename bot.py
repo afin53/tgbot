@@ -5,7 +5,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # --- НАЛАШТУВАННЯ ---
-TOKEN = "ВАШ_ТОКЕН_ТУТ"  # Замініть на токен від @BotFather
+TOKEN = "8947181297:AAFWwYMv3COTxHuNlnYhpDBhPDARlBqDfSc"  # Замініть на токен від @BotFather
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # --- ГЕНЕРАЦІЯ ТА СХОВИЩЕ КЛЮЧІВ ---
