@@ -1,236 +1,268 @@
 import logging
-import threading
-from flask import Flask
+import random
+import string
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-# Налаштування логування
+# --- НАЛАШТУВАННЯ ---
+TOKEN = "ВАШ_ТОКЕН_ТУТ"  # Замініть на токен від @BotFather
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- МІНІ-СЕРВЕР ДЛЯ RENDER (щоб бот працював 24/7) ---
-web_app = Flask('')
+# --- ГЕНЕРАЦІЯ ТА СХОВИЩЕ КЛЮЧІВ ---
+def generate_key():
+    """Генерує ключ формату XXXX-XXXX-XXXX-XXXX"""
+    parts = []
+    for _ in range(4):
+        part = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+        parts.append(part)
+    return '-'.join(parts)
 
-@web_app.route('/')
-def home():
-    return "Бот-шпаргалка працює 24/7! 🚀"
+# 15 згенерованих ключів
+VALID_KEYS = [generate_key() for _ in range(15)]
 
-def run_web():
-    web_app.run(host='0.0.0.0', port=10000)
+# Стан користувачів (для прототипу — у пам'яті)
+# user_id: {"activated": bool, "used_key": str}
+user_sessions = {}
 
-def keep_alive():
-    t = threading.Thread(target=run_web)
-    t.start()
-# -----------------------------------------------------
+# --- РЕЦЕПТ ---
+SALAD_RECIPE = """🐟 Оселедець під шубою
 
-# Головне меню
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+🥗 Інгредієнти:
+
+    🐟 оселедець солоний — 2 шт.;
+    🧅 цибуля — 1 шт.;
+    🥔 картопля — 3 шт.;
+    🥕 морква — 3 шт.;
+    🟣 буряк — 2 шт.;
+    🍏 яблуко — 2 шт.;
+    🥚 яйця — 2 шт.;
+    🤍 майонез — 200 г;
+    🧂 сіль — за смаком.
+
+👩‍🍳 Приготування:
+
+    🔪 Оселедець обробити на філе і нарізати невеликими шматочками.
+    🥔 Картоплю, моркву і буряк вимити і відварити в мундирі до готовності. Дати охолонути.
+    🫘 Усі овочі та яблуко очистити і натерти окремо: на великій тертці, цибулю подрібнити.
+    🥚 Яйця зварити круто і натерти на дрібній тертці.
+    🍽 На велику тарілку викласти половину картоплі, потім — шар оселедця та цибулі, змастити майонезом.
+    🥕 Далі викласти шар моркви, потім — шар буряків, яйця. Кожен шар злегка посолити і змастити майонезом.
+    🍎 Останнім шаром викласти картоплю, яблука. Зверху і з боків покласти буряк.
+    🥄 Розрівняти поверхню, змастити майонезом і поставити в холодильник на 2–3 години.
+    🌿 Перед подачею можна присипати подрібненою зеленою цибулею.
+
+Смачного! 😋"""
+
+# --- КЛАВІАТУРИ ---
+def get_start_keyboard():
     keyboard = [
-        [InlineKeyboardButton("📐 Математика (6 клас)", callback_data="math_menu")],
-        [InlineKeyboardButton("📚 Українська мова (НУШ)", callback_data="ukr_menu")],
-        [InlineKeyboardButton("📖 Зарубіжна література", callback_data="lit_menu")]
+        [InlineKeyboardButton("🔑 Ввести ключ", callback_data="enter_key")],
+        [InlineKeyboardButton("💳 Отримати ключ", callback_data="get_key")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "Привіт! 🤖 Це твій мега-бот шпаргалка для 6 класу.\n"
-        "Вибери предмет, щоб відкрити теми:",
-        reply_markup=reply_markup
+    return InlineKeyboardMarkup(keyboard)
+
+def get_key_info_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_start")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_enter_key_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_start")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_main_menu_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("🥗 Салати", callback_data="cat_salads")],
+        [InlineKeyboardButton("🍳 Смачні сніданки", callback_data="cat_breakfast")],
+        [InlineKeyboardButton("🍲 Обід", callback_data="cat_lunch")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_salads_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("🐟 Оселедець під шубою", callback_data="recipe_herring")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_back_to_menu_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_in_dev_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+# --- ХЕНДЛЕРИ ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обробка /start"""
+    user_id = update.effective_user.id
+
+    # Скидаємо стан при новому /start (окрім вже активованих)
+    if user_id not in user_sessions or not user_sessions[user_id].get("activated"):
+        user_sessions[user_id] = {"activated": False, "used_key": None}
+
+    text = (
+        "👋 Ласкаво просимо до бота з домашніми рецептами!\n\n"
+        "Тут ви знайдете перевірені рецепти страв, які легко приготувати вдома."
     )
 
-# Меню підкатегорій предметів
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=get_start_keyboard())
+    else:
+        await update.message.reply_text(text, reply_markup=get_start_keyboard())
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обробка всіх inline-кнопок"""
     query = update.callback_query
     await query.answer()
     data = query.data
-    
-    back_main = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Головне меню", callback_data="main_menu")]])
-    
-    # --- ГОЛОВНІ МЕНЮ ПРЕДМЕТІВ ---
-    if data == "main_menu":
-        keyboard = [
-            [InlineKeyboardButton("📐 Математика (6 клас)", callback_data="math_menu")],
-            [InlineKeyboardButton("📚 Українська мова (НУШ)", callback_data="ukr_menu")],
-            [InlineKeyboardButton("📖 Зарубіжна література", callback_data="lit_menu")]
-        ]
-        await query.edit_message_text(text="Вибери предмет:", reply_markup=InlineKeyboardMarkup(keyboard))
+    user_id = update.effective_user.id
 
-    elif data == "math_menu":
-        keyboard = [
-            [InlineKeyboardButton("1️⃣ Координатна площина і модуль", callback_data="math_1")],
-            [InlineKeyboardButton("2️⃣ Звичайні дроби (додавання/віднімання)", callback_data="math_2")],
-            [InlineKeyboardButton("3️⃣ Множення і ділення дробів", callback_data="math_3")],
-            [InlineKeyboardButton("4️⃣ Пропорції та відсотки", callback_data="math_4")],
-            [InlineKeyboardButton("5️⃣ Додатні та від'ємні числа", callback_data="math_5")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
-        ]
-        await query.edit_message_text(text="📐 **МАТЕМАТИКА:** Вибери тему:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {"activated": False, "used_key": None}
 
-    elif data == "ukr_menu":
-        keyboard = [
-            [InlineKeyboardButton("1️⃣ Лексикологія (Синоніми, антоніми)", callback_data="ukr_1")],
-            [InlineKeyboardButton("2️⃣ Фразеологізми", callback_data="ukr_2")],
-            [InlineKeyboardButton("3️⃣ Будова слова та орфографія", callback_data="ukr_3")],
-            [InlineKeyboardButton("4️⃣ Іменник як частина мови", callback_data="ukr_4")],
-            [InlineKeyboardButton("5️⃣ Прикметник і Числівник", callback_data="ukr_5")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
-        ]
-        await query.edit_message_text(text="📚 **УКРАЇНСЬКА МОВА:** Вибери тему:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    session = user_sessions[user_id]
 
-    elif data == "lit_menu":
-        keyboard = [
-            [InlineKeyboardButton("1️⃣ Біблійні міфи (Каїн та Авель, Всесвітній потоп)", callback_data="lit_1")],
-            [InlineKeyboardButton("2️⃣ Гомер «Одіссея» та «Іліада»", callback_data="lit_2")],
-            [InlineKeyboardButton("3️⃣ Робінзон Крузо (Даніель Дефо)", callback_data="lit_3")],
-            [InlineKeyboardButton("4️⃣ Марк Твен «Пригоди Тома Сойєра»", callback_data="lit_4")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
-        ]
-        await query.edit_message_text(text="📖 **ЗАРУБІЖНА ЛІТЕРАТУРА:** Вибери тему:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
-    # --- ТЕМИ З МАТЕМАТИКИ ---
-    elif data == "math_1":
+    # --- НАВІГАЦІЯ ---
+    if data == "back_to_start":
         text = (
-            "📐 **Координатна площина і модуль**\n\n"
-            "• **Координатна площина** — це дві осі ($X$ — горизонтальна, $Y$ — вертикальна), що перетинаються в точці $0$. Координата записується як $(x; y)$. Спочатку рухаємось по $X$, потім по $Y$.\n"
-            "• **Модуль ($|x$)** — відстань від 0 до числа. Модуль **завжди додатний** ($|-7| = 7$).\n"
+            "👋 Ласкаво просимо до бота з домашніми рецептами!\n\n"
+            "Тут ви знайдете перевірені рецепти страв, які легко приготувати вдома."
         )
-        back_math = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 До тем з математики", callback_data="math_menu")]])
-        await query.edit_message_text(text=text, reply_markup=back_math, parse_mode="Markdown")
+        await query.edit_message_text(text, reply_markup=get_start_keyboard())
+        return
 
-    elif data == "math_2":
+    if data == "get_key":
         text = (
-            "📐 **Звичайні дроби**\n\n"
-            "• Дріб складається з чисельника (знизу/згори? Згори — скільки взяли) та знаменника (знизу — на скільки поділили).\n"
-            "• **Додавання і віднімання:** Щоб додати чи відністи дроби, вони **обов'язково повинні мати однаковий знаменник**! Якщо різний — шукаємо спільний знаменник (найменше спільне кратне)."
+            "💳 Щоб отримати ключ доступу, напишіть користувачу @Ketotifen\n\n"
+            "Ви зможете купити ключ всього за 15 грн/місяць."
         )
-        back_math = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 До тем з математики", callback_data="math_menu")]])
-        await query.edit_message_text(text=text, reply_markup=back_math, parse_mode="Markdown")
+        await query.edit_message_text(text, reply_markup=get_key_info_keyboard())
+        return
 
-    elif data == "math_3":
-        text = (
-            "📐 **Множення і ділення дробів**\n\n"
-            "• **Множення:** Множимо чисельник на чисельник, а знаменник на знаменник. Можна скорочувати хрест-на-хрест.\n"
-            "• **Ділення:** Щоб поділити один дріб на інший, другий дріб треба «перевернути» (поміняти чисельник і знаменник місцями) і помножити!"
+    if data == "enter_key":
+        if session["activated"]:
+            await query.edit_message_text(
+                "✅ Ви вже активували ключ. Перейдіть до меню рецептів.",
+                reply_markup=get_back_to_menu_keyboard()
+            )
+            return
+        text = "🔑 Введіть ваш ключ у форматі XXXX-XXXX-XXXX-XXXX:"
+        await query.edit_message_text(text, reply_markup=get_enter_key_keyboard())
+        # Встановлюємо стан очікування введення ключа
+        context.user_data["awaiting_key"] = True
+        return
+
+    # --- МЕНЮ КАТЕГОРІЙ (доступне після активації) ---
+    if data == "back_to_menu":
+        if not session["activated"]:
+            await query.edit_message_text(
+                "🔑 Спочатку введіть ключ доступу.",
+                reply_markup=get_start_keyboard()
+            )
+            return
+        text = "📖 Оберіть категорію рецептів:"
+        await query.edit_message_text(text, reply_markup=get_main_menu_keyboard())
+        return
+
+    # --- КАТЕГОРІЇ ---
+    if data == "cat_salads":
+        text = "🥗 Салати:\n\nОберіть рецепт:"
+        await query.edit_message_text(text, reply_markup=get_salads_keyboard())
+        return
+
+    if data in ("cat_breakfast", "cat_lunch"):
+        text = "🚧 Розділ у розробці. Зовсім скоро тут з'являться нові рецепти!"
+        await query.edit_message_text(text, reply_markup=get_in_dev_keyboard())
+        return
+
+    # --- РЕЦЕПТИ ---
+    if data == "recipe_herring":
+        await query.edit_message_text(SALAD_RECIPE, reply_markup=get_back_to_menu_keyboard())
+        return
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обробка текстових повідомлень (введення ключа)"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    # Перевіряємо, чи користувач зараз у режимі введення ключа
+    if context.user_data.get("awaiting_key"):
+
+        if user_id not in user_sessions:
+            user_sessions[user_id] = {"activated": False, "used_key": None}
+
+        session = user_sessions[user_id]
+
+        # Перевірка: чи вже активовано
+        if session["activated"]:
+            await update.message.reply_text("✅ Ви вже активували ключ.")
+            context.user_data["awaiting_key"] = False
+            return
+
+        # Перевірка формату ключа
+        key_input = text.upper().strip()
+        if key_input not in VALID_KEYS:
+            await update.message.reply_text(
+                "❌ Невірний ключ. Спробуйте ще раз або поверніться назад.",
+                reply_markup=get_enter_key_keyboard()
+            )
+            return
+
+        # Перевірка: чи ключ вже використано кимось іншим
+        key_already_used = any(
+            s.get("used_key") == key_input
+            for uid, s in user_sessions.items()
+            if s.get("activated") and uid != user_id
         )
-        back_math = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 До тем з математики", callback_data="math_menu")]])
-        await query.edit_message_text(text=text, reply_markup=back_math, parse_mode="Markdown")
 
-    elif data == "math_4":
-        text = (
-            "📐 **Пропорції та відсотки**\n\n"
-            "• **Пропорція** — це рівність двох відношень ($a:b = c:d$). Основна властивість: добуток крайніх членів дорівнює добутку середніх ($a \\cdot d = b \\cdot c$).\n"
-            "• **Відсоток** — це одна сота частина ($1\\% = 0.01$). Щоб знайти відсоток від числа, треба число помножити на дріб або поділити на 100."
+        if key_already_used:
+            await update.message.reply_text(
+                "❌ Цей ключ вже було використано іншим користувачем.",
+                reply_markup=get_enter_key_keyboard()
+            )
+            return
+
+        # Успішна активація
+        session["activated"] = True
+        session["used_key"] = key_input
+        context.user_data["awaiting_key"] = False
+
+        await update.message.reply_text(
+            "✅ Ключ успішно активовано! Ласкаво просимо до рецептів.",
+            reply_markup=get_main_menu_keyboard()
         )
-        back_math = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 До тем з математики", callback_data="math_menu")]])
-        await query.edit_message_text(text=text, reply_markup=back_math, parse_mode="Markdown")
+        return
 
-    elif data == "math_5":
-        text = (
-            "📐 **Додатні та від'ємні числа**\n\n"
-            "• Це числа з мінусом і плюсом (ціле множиство — цілі числа). \n"
-            "• **Додавання:** Якщо знаки однакові — додаємо і залишаємо знак. Якщо різні — віднімаємо від більшого менший і ставимо знак більшого.\n"
-            "• **Множення/ділення:** Мінус на мінус дає плюс ($(-2) \\cdot (-3) = 6$)."
-        )
-        back_math = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 До тем з математики", callback_data="math_menu")]])
-        await query.edit_message_text(text=text, reply_markup=back_math, parse_mode="Markdown")
+    # Якщо не в режимі введення ключа — підказка
+    await update.message.reply_text(
+        "Скористайтеся кнопками в меню або введіть /start.",
+        reply_markup=get_start_keyboard()
+    )
 
-    # --- ТЕМИ З УКРАЇНСЬКОЇ МОВИ ---
-    elif data == "ukr_1":
-        text = (
-            "📚 **Лексикологія**\n\n"
-            "• **Синоніми** — різні слова з однаковим значенням (говорити — казати).\n"
-            "• **Антоніми** — слова з протилежним значенням (добро — зло).\n"
-            "• **Омоніми** — слова, однакові за звучанням, але різні за змістом (клас у школі та клас! як вигук)."
-        )
-        back_ukr = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 До тем з мови", callback_data="ukr_menu")]])
-        await query.edit_message_text(text=text, reply_markup=back_ukr, parse_mode="Markdown")
 
-    elif data == "ukr_2":
-        text = (
-            "📚 **Фразеологізми**\n\n"
-            "• Це стійкі сполучення слів, які дорівнюють одному за значенням (часто дієслову або прислівнику).\n"
-            "• *Приклади:* \n"
-            "  - Пекти раків — червоніти (соромитися).\n"
-            "  - Кדувити ворана — байдикувати, нічого не робити.\n"
-            "  - Зарубати на носі — добре запам'ятати."
-        )
-        back_ukr = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 До тем з мови", callback_data="ukr_menu")]])
-        await query.edit_message_text(text=text, reply_markup=back_ukr, parse_mode="Markdown")
-
-    elif data == "ukr_3":
-        text = (
-            "📚 **Будова слова та правопис**\n\n"
-            "• **Складові:** Закінчення (змінювана частина), основа (все без закінчення), корінь (головна частина), префікс (перед коренем), суфікс (після кореня).\n"
-            "• **Не з різними частинами мови:** Пишеться разом або окремо залежно від правила (якщо без «не» слово не вживається — пишеться разом: *недовіра*)."
-        )
-        back_ukr = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 До тем з мови", callback_data="ukr_menu")]])
-        await query.edit_message_text(text=text, reply_markup=back_ukr, parse_mode="Markdown")
-
-    elif data == "ukr_4":
-        text = (
-            "📚 **Іменник**\n\n"
-            "• Самостійна частина мови, що означає предмет і відповідає на питання *хто? що?*.\n"
-            "• Має рід (чоловічий, жіночий, середній, спільний), число (однина, множина) та відмінки (їх 7: Називний, Родовий, Давальний, Знахідний, Орудний, Місцевий, Кличний)."
-        )
-        back_ukr = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 До тем з мови", callback_data="ukr_menu")]])
-        await query.edit_message_text(text=text, reply_markup=back_ukr, parse_mode="Markdown")
-
-    elif data == "ukr_5":
-        text = (
-            "📚 **Прикметник і Числівник**\n\n"
-            "• **Прикметник:** ознака предмета (*який? яка? яке?*). Змінюється за родами, числами і відмінками.\n"
-            "• **Числівник:** кількість або порядок при лічбі (*скільки? який?*). Бувають кількісні (п'ять) та порядкові (п'ятий)."
-        )
-        back_ukr = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 До тем з мови", callback_data="ukr_menu")]])
-        await query.edit_message_text(text=text, reply_markup=back_ukr, parse_mode="Markdown")
-
-    # --- ТЕМИ З ЛІТЕРАТУРИ ---
-    elif data == "lit_1":
-        text = (
-            "📖 **Біблійні міфи**\n\n"
-            "• **Каїн та Авель:** Сини Адама. Пастух Авель і хлібороб Каїн принесли жертви Богу. Дар Авеля прийняли, а Каїна — ні через зависть. Каїн убив брата. *Сенс:* поборюйте заздрощі всередині.\n"
-            "• **Всесвітній потоп і Ной:** Через розбещеність людей Бог вирішив знищити світ, але Ной був праведним. Він збудував ковчег і врятував родину та тварин кожного виду."
-        )
-        back_lit = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 До тем з літератури", callback_data="lit_menu")]])
-        await query.edit_message_text(text=text, reply_markup=back_lit, parse_mode="Markdown")
-
-    elif data == "lit_2":
-        text = (
-            "📖 **Гомер — «Іліада» та «Одіссея»**\n\n"
-            "• Давньогрецькі поеми, що основані на міфах про Троянську війну.\n"
-            "• **Іліада:** Розповідає про облогу Трої греками через викрадення красуні Олени троянським принцем Парісом.\n"
-            "• **Одіссея:** Пригоди царя Одіссея, який після війни 10 років намагався повернутися додому на острів Ітака, долаючи циклопів та сирен."
-        )
-        back_lit = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 До тем з літератури", callback_data="lit_menu")]])
-        await query.edit_message_text(text=text, reply_markup=back_lit, parse_mode="Markdown")
-
-    elif data == "lit_3":
-        text = (
-            "📖 **Даніель Дефо — «Робінзон Крузо»**\n\n"
-            "• Історія про моряка, який через корабельну аварію потрапив на безлюдний острів і прожив там сам 28 років.\n"
-            "• *Сенс:* Людина здатна вижити у будь-яких умовах завдяки праці, розуму, силі волі та оптимізму. Знайомство з дикуном П'ятницею вчить дружби і людяності."
-        )
-        back_lit = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 До тем з літератури", callback_data="lit_menu")]])
-        await query.edit_message_text(text=text, reply_markup=back_lit, parse_mode="Markdown")
-
-    elif data == "lit_4":
-        text = (
-            "📖 **Марк Твен — «Пригоди Тома Сойєра»**\n\n"
-            "• Повість про вигадливого хлопчика Тома, який живе у містечку на березі Міссісіпі.\n"
-            "• Відомий епізод, де він змусив інших хлопчаків фарбувати паркан замість нього, перетворивши покарання на привілей.\n"
-            "• *Сенс:* Важливість справжньої дружби, дитячої свободи, щирості та боротьби з лицемірством дорослих."
-        )
-        back_lit = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 До тем з літератури", callback_data="lit_menu")]])
-        await query.edit_message_text(text=text, reply_markup=back_lit, parse_mode="Markdown")
-
-if __name__ == '__main__':
-    # Запускаємо веб-сервер для фону
-    keep_alive()
-    
-    # Встав сюди свій токен від BotFather
-    app = ApplicationBuilder().token("ВАШ_ТОКЕН_ВІД_BOTFATHER").build()
+# --- ЗАПУСК ---
+def main():
+    app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Мега-бот шпаргалка запущено успішно!")
-    app.run_polling()
+    print("Бот запущено...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
